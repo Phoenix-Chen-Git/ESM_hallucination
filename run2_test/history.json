@@ -1,0 +1,26 @@
+[
+    {
+        "step": 0,
+        "score": 0.4459173381328583,
+        "best_score": 0.4459173381328583,
+        "seq": "AYFNKNDCWFLYYYPSILYQSGTIFCYFVYLCVLWGMETG"
+    },
+    {
+        "step": 10,
+        "score": 0.7468270063400269,
+        "best_score": 0.7468270063400269,
+        "seq": "VAWCWYWWWYYYWCYHWWHSWCTWCRWWWWWCWYWWWWWW"
+    },
+    {
+        "step": 20,
+        "score": 0.9099328517913818,
+        "best_score": 0.9099328517913818,
+        "seq": "LVWFAYWYWWYYYYYYCCYHHYYEYKWWYWWYYYFYYWWW"
+    },
+    {
+        "step": 29,
+        "score": 0.9361326098442078,
+        "best_score": 0.9361326098442078,
+        "seq": "VYYFAYYYRWYYYYYYCCRYWYYEYKYWYWYFYYFYYETW"
+    }
+]
