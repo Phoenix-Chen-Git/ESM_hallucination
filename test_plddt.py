@@ -1,8 +1,8 @@
 import torch
 from transformers import AutoTokenizer, EsmForProteinFolding
 
-model = EsmForProteinFolding.from_pretrained('/home/ubuntu/FORD/esmfold/esm_weights', weights_only=False).float()
-tokenizer = AutoTokenizer.from_pretrained('/home/ubuntu/FORD/esmfold/esm_weights')
+model = EsmForProteinFolding.from_pretrained('/home/ubuntu/esm_weights', weights_only=False).float()
+tokenizer = AutoTokenizer.from_pretrained('/home/ubuntu/esm_weights')
 inputs = tokenizer(['MAGAMAGAMAGA'], return_tensors='pt', add_special_tokens=False)
 
 model.eval()

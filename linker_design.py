@@ -72,12 +72,28 @@ def compute_tm_score(coords1, coords2, seq1, seq2):
 
 
 class LinkerDesigner:
-    def __init__(self, model_path, device=None):
+    def __init__(self, model_path, device=None, multi_gpu=False, gradient_checkpointing=False):
+        self.multi_gpu = multi_gpu
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Loading model from {model_path}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = EsmForProteinFolding.from_pretrained(model_path, weights_only=False)
         self.model.to(self.device)
+        
+        if gradient_checkpointing:
+            print("Enabling gradient checkpointing for memory efficiency...")
+            self.model.esm.encoder.gradient_checkpointing = True
+        
+        # Set trunk chunk_size to reduce memory for structure module
+        if hasattr(self.model, 'trunk') and hasattr(self.model.trunk, 'chunk_size'):
+            self.model.trunk.chunk_size = 32  # Process in smaller chunks
+            print(f"Set trunk chunk_size to 32 for memory efficiency")
+        
+        # Reduce number of recycles for memory efficiency
+        if hasattr(self.model, 'trunk') and hasattr(self.model.trunk, 'num_recycles'):
+            self.model.trunk.num_recycles = 2  # Reduce from default 4
+            print(f"Set num_recycles to 2 for memory efficiency")
+        
         self.model.eval()
         
         # Monkey-patch for inputs_embeds support
@@ -109,9 +125,10 @@ class LinkerDesigner:
             param.requires_grad = False
         
         # AA mappings
+        self.embed_device = self.device
         self.aa_ids = torch.tensor(
             [self.tokenizer.convert_tokens_to_ids(aa) for aa in AA_ALPHABET], 
-            device=self.device
+            device=self.embed_device
         )
         self.esm_cls_id = self.model.esm_dict_cls_idx
         self.esm_eos_id = self.model.esm_dict_eos_idx
@@ -119,7 +136,7 @@ class LinkerDesigner:
 
     def seq_to_logits(self, seq):
         """Convert sequence string to one-hot logits."""
-        logits = torch.zeros(1, len(seq), 20, device=self.device)
+        logits = torch.zeros(1, len(seq), 20, device=self.embed_device)
         for i, aa in enumerate(seq):
             if aa in AA_ALPHABET:
                 idx = AA_ALPHABET.index(aa)
@@ -205,8 +222,7 @@ class LinkerDesigner:
         out_dir="linker_design_results"
     ):
         # Clear GPU cache
-        if self.device == "cuda":
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
@@ -231,7 +247,7 @@ class LinkerDesigner:
         
         # Initialize logits
         # Fixed regions get strong bias, linker is random
-        logits = torch.zeros(1, total_len, 20, device=self.device)
+        logits = torch.zeros(1, total_len, 20, device=self.embed_device)
         
         # Set Chain A (fixed)
         for i, aa in enumerate(seq_a):
@@ -241,7 +257,7 @@ class LinkerDesigner:
         # Set Linker (random initialization - will be optimized)
         linker_start = len_a
         linker_end = len_a + linker_length
-        logits[0, linker_start:linker_end] = torch.randn(linker_length, 20, device=self.device) * 0.1
+        logits[0, linker_start:linker_end] = torch.randn(linker_length, 20, device=self.embed_device) * 0.1
         
         # Set Chain C (fixed)
         for i, aa in enumerate(seq_c):
@@ -249,7 +265,7 @@ class LinkerDesigner:
                 logits[0, linker_end + i, AA_ALPHABET.index(aa)] = 10.0
         
         # Create mask for linker positions (only these get gradients)
-        linker_mask = torch.zeros(total_len, dtype=torch.bool, device=self.device)
+        linker_mask = torch.zeros(total_len, dtype=torch.bool, device=self.embed_device)
         linker_mask[linker_start:linker_end] = True
         fixed_mask = ~linker_mask
         
@@ -305,8 +321,8 @@ class LinkerDesigner:
             pred_a_coords_t = structure["positions"][-1][0, :len_a, 1, :]  # CA of Chain A
             pred_c_coords_t = structure["positions"][-1][0, linker_end:, 1, :]  # CA of Chain C
             
-            gt_a_t = torch.tensor(coords_a, device=self.device, dtype=pred_a_coords_t.dtype)
-            gt_c_t = torch.tensor(coords_c, device=self.device, dtype=pred_c_coords_t.dtype)
+            gt_a_t = torch.tensor(coords_a, device=pred_a_coords_t.device, dtype=pred_a_coords_t.dtype)
+            gt_c_t = torch.tensor(coords_c, device=pred_c_coords_t.device, dtype=pred_c_coords_t.dtype)
             
             # Compute RMSD (normalized, in Angstroms) - much better scaling
             rmsd_a = torch.sqrt(((pred_a_coords_t - gt_a_t) ** 2).sum(dim=-1).mean())
@@ -407,11 +423,14 @@ def main():
     parser.add_argument("--plddt_weight", type=float, default=1.0, help="pLDDT loss weight")
     parser.add_argument("--tm_weight", type=float, default=1.0, help="TM/coord loss weight")
     parser.add_argument("--out_dir", type=str, default="linker_results", help="Output directory")
-    parser.add_argument("--weights", type=str, default="/home/ubuntu/FORD/esmfold/esm_weights")
+    parser.add_argument("--weights", type=str, default="/home/ubuntu/esm_weights")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing for memory efficiency")
+    parser.add_argument("--gpu", type=int, default=0, help="GPU device ID to use")
     
     args = parser.parse_args()
     
-    designer = LinkerDesigner(args.weights)
+    device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
+    designer = LinkerDesigner(args.weights, device=device, gradient_checkpointing=args.gradient_checkpointing)
     designer.design_linker(
         pdb_path=args.pdb,
         chain_a_id=args.chain_a,

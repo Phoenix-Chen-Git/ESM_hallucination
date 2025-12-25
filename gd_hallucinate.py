@@ -237,7 +237,7 @@ def main():
     parser.add_argument("--steps", type=int, default=100, help="Number of GD steps")
     parser.add_argument("--lr", type=float, default=0.1, help="Learning rate")
     parser.add_argument("--out_dir", type=str, default="gd_hallucination", help="Output directory")
-    parser.add_argument("--weights", type=str, default="/home/ubuntu/FORD/esmfold/esm_weights", help="Model weights")
+    parser.add_argument("--weights", type=str, default="/home/ubuntu/esm_weights", help="Model weights")
     parser.add_argument("--seed_seq", type=str, default=None, help="Starting sequence")
     parser.add_argument("--fixed_pos", type=str, default=None, help="Fixed positions (1-indexed)")
     

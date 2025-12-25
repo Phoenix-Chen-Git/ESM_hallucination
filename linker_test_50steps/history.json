@@ -1,0 +1,44 @@
+[
+    {
+        "step": 0,
+        "linker_plddt": 0.46924906969070435,
+        "tm_score": 0.6026599044233126,
+        "linker_seq": "DMEVYYVSYVQAIHEQAMTVTNMQVVSFPF",
+        "temperature": 0.995
+    },
+    {
+        "step": 10,
+        "linker_plddt": 0.5116755366325378,
+        "tm_score": 0.6136667285601476,
+        "linker_seq": "LMEVYYLSYVARIAVRPMTHPNMQAVNFPF",
+        "temperature": 0.946354579813443
+    },
+    {
+        "step": 20,
+        "linker_plddt": 0.4945385158061981,
+        "tm_score": 0.619348183419662,
+        "linker_seq": "VLTHYGPRHPARVEVHPMTHPNMAHCSFPI",
+        "temperature": 0.9000874278732445
+    },
+    {
+        "step": 30,
+        "linker_plddt": 0.5400305986404419,
+        "tm_score": 0.6218213996461236,
+        "linker_seq": "MLAHYGRVHQQNVGVHPMTKKNMPHPVDPF",
+        "temperature": 0.8560822709551227
+    },
+    {
+        "step": 40,
+        "linker_plddt": 0.5961933135986328,
+        "tm_score": 0.6253512543552834,
+        "linker_seq": "CLAHYNRNHQNKLGRSKMPKRNMKHSADSF",
+        "temperature": 0.8142285204175609
+    },
+    {
+        "step": 49,
+        "linker_plddt": 0.584622859954834,
+        "tm_score": 0.6302472545841102,
+        "linker_seq": "TFAHYTRNHQNKPGRSKMHKINKHHAHYRF",
+        "temperature": 0.778312557068642
+    }
+]

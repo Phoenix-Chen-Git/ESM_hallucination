@@ -1,214 +1,164 @@
-# ESMFold Protein Hallucination & Linker Design
+# ESMFold Gradient-Based Linker Design: Lessons Learned
 
-## Overview
+## The Challenge
 
-This project implements protein sequence optimization using ESMFold, including:
-1. **MCMC-based hallucination** - Monte Carlo optimization of sequences
-2. **Gradient-based hallucination** - Backpropagation through soft embeddings
-3. **Linker design** - Designing rigid linkers between protein chains
+We wanted to design a **30-residue linker** between:
+- **Chain A**: 195 amino acids (full chain)
+- **Chain C**: 100 amino acids (residues 1-100)
+- **Total sequence length**: 325 residues
 
-## Environment
-
-```bash
-conda env create -f env/mlfold.yml
-conda activate mlfold
-```
-
-ESMFold weights: `/home/ubuntu/FORD/esmfold/esm_weights`
+The goal was to use **gradient descent** (not MCMC) to optimize the linker sequence by backpropagating through ESMFold.
 
 ---
 
-## Scripts
+## Why ESMFold is Memory-Hungry
 
-| Script | Description |
-|--------|-------------|
-| `hallucinate.py` | MCMC-based sequence optimization (simulated annealing) |
-| `gd_hallucinate.py` | Gradient descent on sequence logits (frozen ESM weights) |
-| `linker_design.py` | Design linkers between two protein chains |
-| `animate_protein.py` | Create GIF animations from PDB snapshots |
-| `make_trajectory.py` | Combine PDBs into multi-model trajectory |
-| `view_pdb.py` | Browser-based 3D protein viewer |
-| `view_protein.ipynb` | Jupyter notebook for interactive viewing |
+ESMFold's architecture creates massive memory requirements during backpropagation:
 
----
+1. **ESM-2 Encoder** (33 layers): Standard transformer with O(L²) attention
+2. **Structure Module (Trunk)** (48 blocks): Each block has:
+   - Pairwise representation: `(B, L, L, 128)` tensor
+   - Triangular attention: O(L²) operations
+   - Multiple attention heads storing intermediate activations
 
-## Experiments
-
-### 1. MCMC Hallucination (`run1/`)
-
-```bash
-python hallucinate.py --length 100 --steps 500 --out_dir run1
-```
-
-- **Method**: Random mutations + Metropolis acceptance
-- **Objective**: Maximize pLDDT
-- **Result**: Basic sequence optimization, slower convergence
-
-### 2. Gradient-Based Hallucination (`run2/`, `run2_test/`)
-
-```bash
-python gd_hallucinate.py --length 68 --steps 200 --lr 0.5 --out_dir run2
-```
-
-- **Method**: Optimize sequence logits via backpropagation
-- **Key insight**: Freeze ESM weights, only update soft sequence representation
-- **Result**: Faster convergence, smoother optimization landscape
+For L=325 residues:
+- Pairwise tensors alone: 325 × 325 × 128 × 4 bytes = **54 MB per tensor**
+- With 48 blocks and multiple heads: **tens of GB** just for activations
+- Backward pass needs to store all these for gradient computation
 
 ---
 
-## Linker Design Experiments
+## What We Tried (and Failed)
 
-**Task**: Design a rigid linker connecting Chain A (C-terminal) to Chain C (N-terminal) of `design/design4.pdb`
+### 1. Standard Gradient Descent
+**Result**: CUDA OOM immediately
+- Standard backprop stores all intermediate activations
+- 80GB GPU not enough for 325-residue sequence
 
-**Objectives**:
-1. Maximize linker pLDDT (confidence)
-2. Maximize TM-score to ground truth (scaffold preservation)
-
-### Memory Constraints (80GB A100)
-
-| Total Length | Status |
-|-------------|--------|
-| 208 residues | ✓ Works |
-| 228 residues | ✓ Works (limit) |
-| 230 residues | ✗ OOM |
-
-**Scaling formula**: `max_length ≈ 228 × sqrt(VRAM_GB / 80)`
-
-| VRAM | Max Length | Per Chain (with 30 AA linker) |
-|------|-----------|-------------------------------|
-| 80GB | ~228 | 99 AA |
-| 160GB | ~322 | 146 AA |
-| 320GB | ~456 | 213 AA |
-| 640GB | ~644 | 307 AA |
-
-### Run 1 (`linker_run1/`) - Initial attempt with broken loss
-
-```bash
-python linker_design.py --pdb design/design4.pdb \
-  --chain_a A --chain_c C \
-  --chain_a_start 96 --chain_c_max 100 \
-  --linker_len 8 --steps 100
+### 2. Gradient Checkpointing on ESM Encoder Only
+```python
+self.model.esm.encoder.gradient_checkpointing = True
 ```
+**Result**: Still OOM
+- Only checkpoints the ESM-2 encoder
+- Trunk (structure module) still stores all activations
 
-**Issue**: `coord_loss` (~2000) dominated `plddt_loss` (~0.5)
+### 3. Mixed Precision (FP16)
+```python
+with torch.cuda.amp.autocast():
+    output = self.forward_soft(full_logits)
+```
+**Result**: Still OOM
+- Halves memory for forward pass
+- But gradient computation still needs too much memory
+- Also broke SVD operation (had to cast back to float32 for Kabsch RMSD)
+
+### 4. Reducing Recycles
+```python
+self.model.trunk.no_recycles = 0
+```
+**Result**: Still OOM
+- Fewer recycles = fewer forward passes
+- But a single forward+backward still exceeds memory
+
+### 5. FSDP (Fully Sharded Data Parallel) with 4 GPUs
+```python
+self.model = FSDP(self.model, sharding_strategy=ShardingStrategy.FULL_SHARD)
+```
+**Result**: Still OOM
+- FSDP shards model weights across GPUs
+- But doesn't help with activation memory during backprop
+- Also had dtype compatibility issues (ESMFold has mixed float16/float32 params)
+
+---
+
+## The Solution That Worked ✅
+
+### Aggressive Per-Block Gradient Checkpointing
+
+The key insight: **Checkpoint each individual block in the trunk**, not just the whole trunk or encoder.
 
 ```python
-# Bad loss function
-total_loss = plddt_weight * plddt_loss + tm_weight * coord_loss * 0.01
-# coord_loss * 0.01 = 20.26 >> plddt_loss = 0.52
+from torch.utils.checkpoint import checkpoint
+
+# Monkey-patch each trunk block to use gradient checkpointing
+def block_forward_with_checkpoint(self_block, *args, **kwargs):
+    return checkpoint(
+        self_block.__class__.forward, 
+        self_block, 
+        *args, 
+        **kwargs, 
+        use_reentrant=False
+    )
+
+for block in self.model.trunk.blocks:
+    block.forward = block_forward_with_checkpoint.__get__(block, block.__class__)
 ```
 
-**Result**: pLDDT stuck at 0.52
+### Why This Works
 
-### Run 3 (`linker_run3/`) - Fixed loss scaling ✓
+1. **Checkpointing trades compute for memory**: Instead of storing activations, recompute them during backward pass
+2. **Per-block granularity is key**: Checkpointing the whole trunk at once doesn't help because inputs to the trunk are still huge. Per-block checkpointing only keeps one block's activations at a time.
+3. **Combined with other optimizations**:
+   - Small chunk size: `self.model.trunk.chunk_size = 4`
+   - FP16 forward pass: `torch.cuda.amp.autocast()`
+   - Zero recycles: `no_recycles=0`
 
-```bash
-python linker_design.py --pdb design/design4.pdb \
-  --chain_a A --chain_c C \
-  --chain_a_start 96 --chain_c_max 100 \
-  --linker_len 8 --steps 100 \
-  --plddt_weight 1.0 --tm_weight 1.0
-```
-
-**Fix**: Normalized RMSD to 0-1 scale
+### Full Working Configuration
 
 ```python
-# Fixed loss function
-rmsd_loss_normalized = rmsd_loss / 50.0  # ~0-1 range
-total_loss = plddt_weight * plddt_loss + tm_weight * rmsd_loss_normalized
+# 1. Enable gradient checkpointing on ESM encoder
+self.model.esm.encoder.gradient_checkpointing = True
+
+# 2. Reduce trunk chunk size
+self.model.trunk.chunk_size = 4
+
+# 3. Monkey-patch EVERY trunk block with checkpointing
+for block in self.model.trunk.blocks:
+    block.forward = block_forward_with_checkpoint.__get__(block, block.__class__)
+
+# 4. Use mixed precision for forward pass
+with torch.cuda.amp.autocast():
+    output = self.forward_soft(full_logits, num_recycles=0)
+
+# 5. Move RMSD computation outside autocast (SVD doesn't support fp16)
+rmsd_a = self.kabsch_rmsd(pred_a.float(), gt_coords_a.float())
 ```
+
+---
+
+## Results
 
 | Metric | Value |
 |--------|-------|
-| Linker length | 8 AA |
-| Designed linker | `AVERREQL` |
-| Linker pLDDT | **0.66** |
-| TM-score | 0.50 |
-| Total residues | 208 |
-
-### Run 4 (`linker_run4/`) - 30 AA Linker ✓ (Best)
-
-```bash
-python linker_design.py --pdb design/design4.pdb \
-  --chain_a A --chain_c C \
-  --chain_a_start 116 --chain_c_max 80 \
-  --linker_len 30 --steps 150 \
-  --plddt_weight 1.0 --tm_weight 1.0
-```
-
-| Metric | Value |
-|--------|-------|
-| Chain A | 80 AA (C-terminal) |
-| Linker length | 30 AA |
-| Chain C | 80 AA (N-terminal) |
-| Designed linker | `AADWIIMLIKWFIIAIIEAIAIIAEIIAAF` |
-| Linker pLDDT | **0.80** ⬆️ |
-| TM-score | 0.52 |
-| Total residues | 190 |
-
-**Note**: The longer linker achieved much higher confidence. The hydrophobic sequence suggests a stable alpha helix.
+| Sequence Length | 325 residues |
+| GPU Memory Used | ~70-75 GB (single A800) |
+| Time per Step | ~30 seconds |
+| Starting pLDDT | 0.588 |
+| Final pLDDT (10 steps) | 0.715 |
+| Improvement | +22% |
 
 ---
 
-## Key Learnings
+## Key Takeaways
 
-### 1. Loss Function Scaling is Critical
-When combining multiple objectives:
-- Normalize all terms to similar scales (0-1 range)
-- RMSD in Angstroms (~50Å) needs `/50` to match pLDDT (~0.5)
-
-### 2. Memory Scales Quadratically
-- Attention + pairwise representations: O(L²)
-- For gradient-based optimization, need extra memory for backward pass
-- 80GB GPU → max ~228 residues with gradients
-
-### 3. Longer Linkers Can Be More Confident
-- 8 AA linker: 0.66 pLDDT
-- 30 AA linker: 0.80 pLDDT
-- More residues give ESMFold more context to form stable secondary structure
+1. **Gradient checkpointing granularity matters**: Per-block checkpointing >> whole-model checkpointing
+2. **ESMFold's trunk is the bottleneck**: The structure module with its pairwise representations is what kills memory
+3. **Mixed precision helps but isn't enough**: FP16 alone doesn't solve the activation memory problem
+4. **FSDP doesn't magically solve everything**: It shards weights, not activations
+5. **Always test with small steps first**: We used 10 steps to validate before running longer optimizations
 
 ---
 
-## Usage for Multi-GPU (4× A800)
+## Files
 
-With ~320GB total VRAM, you could potentially run:
-
-```bash
-# Full Chain A (195 AA) + 30 AA linker + 100 AA Chain C = 325 residues
-python linker_design.py --pdb design/design4.pdb \
-  --chain_a A --chain_c C \
-  --chain_a_start 1 --chain_c_max 100 \
-  --linker_len 30 --steps 200 \
-  --plddt_weight 1.0 --tm_weight 1.0 \
-  --out_dir linker_full
-```
-
-**Note**: May need to implement model parallelism or gradient checkpointing for multi-GPU.
+- `linker_design_gradient_multigpu.py`: Working gradient-based linker design script
+- `linker_fullA_30aa_gd/`: Output directory with results
 
 ---
 
-## Output Files
+## Hardware Used
 
-Each run produces:
-- `best.pdb` - Best structure by linker pLDDT
-- `final_best.pdb` - Same as best.pdb
-- `step_XXXX.pdb` - Snapshots every 10 steps
-- `history.json` - Optimization trajectory
-- `result.txt` - Final summary
-- `designed.fasta` - Final sequence in FASTA format
-
----
-
-## Visualization
-
-```bash
-# Browser-based viewer
-python view_pdb.py linker_run4/
-
-# Create animation GIF
-python animate_protein.py linker_run4/ --output animation.gif
-
-# Jupyter notebook
-jupyter notebook view_protein.ipynb
-```
-
+- 4× NVIDIA A800-SXM4-80GB (320GB total)
+- Only 1 GPU needed with per-block checkpointing
+- Other 3 GPUs can run parallel experiments with different seeds

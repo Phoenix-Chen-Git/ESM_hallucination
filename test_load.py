@@ -2,7 +2,7 @@ import os
 import torch
 from transformers import AutoTokenizer, EsmForProteinFolding
 
-MODEL_NAME = "/home/ubuntu/FORD/esmfold/esm_weights"
+MODEL_NAME = "/home/ubuntu/esm_weights"
 
 def test_load():
     print(f"Loading model from {MODEL_NAME}...")

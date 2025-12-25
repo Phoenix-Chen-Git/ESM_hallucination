@@ -65,7 +65,7 @@ def main():
     parser.add_argument("--end_temp", type=float, default=0.0001, help="Ending temperature for MCMC")
     parser.add_argument("--mut_per_step", type=int, default=1, help="Number of mutations per step")
     parser.add_argument("--out_dir", type=str, default="hallucination_results", help="Output directory")
-    parser.add_argument("--weights", type=str, default="/home/ubuntu/FORD/esmfold/esm_weights", help="Path to ESMFold weights")
+    parser.add_argument("--weights", type=str, default="/home/ubuntu/esm_weights", help="Path to ESMFold weights")
     parser.add_argument("--seed_seq", type=str, default=None, help="Starting sequence")
     parser.add_argument("--fixed_pos", type=str, default=None, help="Fixed positions (1-indexed, comma-separated)")
     
