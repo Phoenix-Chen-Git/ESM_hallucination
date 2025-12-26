@@ -162,3 +162,4 @@ rmsd_a = self.kabsch_rmsd(pred_a.float(), gt_coords_a.float())
 - 4× NVIDIA A800-SXM4-80GB (320GB total)
 - Only 1 GPU needed with per-block checkpointing
 - Other 3 GPUs can run parallel experiments with different seeds
+
